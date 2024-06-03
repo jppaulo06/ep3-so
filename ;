@@ -169,8 +169,6 @@ char* err_msg = NULL;
 #define DIR_DIR_TYPE 1
 #define DIR_FILE_TYPE 2
 
-#define DIR_MAX_SIZE (1 << 16)
-
 struct disk {
 	bool mounted;
 	char* path;
@@ -185,7 +183,7 @@ struct disk {
 	u32 creation_time;
 
 	u32 bitmap_size;
-	char bitmap[BITMAP_MAX_SIZE];
+	u32 bitmap[BITMAP_MAX_SIZE];
 
 	u32 fat[MAX_FAT_SIZE];
 };
@@ -618,35 +616,8 @@ void get_path_list(char* path, char path_list[MAX_DIR_DEPTH][DIR_NAME_SIZE], i64
 	*path_list_size = i;
 }
 
-int dir_load(struct disk* disk, u32 dir_entry_block, char loaded_directory[DIR_MAX_SIZE]) {
-	u32 fat_index = dir_entry_block;
-	u32 bytes_read = 0;
-
-	while(fat_index != FAT_LAST_BLOCK) {
-		block_index = disk->data + dir_block * BLOCK_SIZE;
-
-		ret = fseek(disk->file, block_index, SEEK_SET);
-		if(ret) {
-			print_error("Could not seek to the directory index");
-			return ret;
-		}
-
-		ret = fread(loaded_directory + bytes_read, sizeof(char), BLOCK_SIZE, disk->file);
-
-		if (ret != BLOCK_SIZE) {
-			print_error("Could not read the amount of entries");
-			return EOF;
-		}
-
-		bytes_read += BLOCK_SIZE;
-		fat_index = fat[fat_index];
-	}
-
-	return 0;
-}
-
 int search_dir_index(struct disk* disk, char path_list[MAX_DIR_DEPTH][DIR_NAME_SIZE], i64 depth, u32* dir_block) {
-	i64 ret = 0;
+	i64 ret;
 	u32 i, j;
 	u32 entries_amount;
 	u32 entry_type;
@@ -654,25 +625,22 @@ int search_dir_index(struct disk* disk, char path_list[MAX_DIR_DEPTH][DIR_NAME_S
 	u32 entry_block_index;
 
 	*dir_block = 0;
-	char loaded_directory[DIR_MAX_SIZE];
+	char** loaded_directory;
 
 	for(i = 0; i < depth; i++) {
-		ret = dir_load(*dir_block, loaded_directory);
-		if(ret) {
-			print_error("Could not load the directory");
-			return ret;
-		}
+
+		get_dir(*dir_block, loaded_directory);
 
 		ret = fseek(disk->file, dir_index, SEEK_SET);
 		if(ret) {
 			print_error("Could not seek to the directory index");
-			goto search_dir_index_unload;
+			return ret;
 		}
 
 		ret = fread(&entries_amount, sizeof(u32), 1, disk->file);
 		if(ret != sizeof(u32)) {
 			print_error("Could not read the amount of entries");
-			goto search_dir_index_unload;
+			return EOF;
 		}
 
 		j = 0;
@@ -681,13 +649,13 @@ int search_dir_index(struct disk* disk, char path_list[MAX_DIR_DEPTH][DIR_NAME_S
 			ret = fseek(disk->file, dir_index + j * DIR_ENTRY_SIZE, SEEK_SET);
 			if(ret) {
 				print_error("Could not seek to the entry index");
-				goto search_dir_index_unload;
+				return EOF;
 			}
 
-			ret = fread(&entry_type, DIR_TYPE_SIZE, 1, disk->file);
-			if(ret != DIR_TYPE_SIZE) {
+			ret = fread(&entry_type, sizeof(u32), 1, disk->file);
+			if(ret != sizeof(u32)) {
 				print_error("Could not read the entry type");
-				goto search_dir_index_unload;
+				return EOF;
 			}
 
 			if(entry_type != DIR_DIR_TYPE) {
@@ -721,9 +689,7 @@ int search_dir_index(struct disk* disk, char path_list[MAX_DIR_DEPTH][DIR_NAME_S
 		}
 	}
 
-search_dir_index_unload:
-	dir_unload(loaded_directory);
-	return ret;
+	return dir_index;
 }
 
 int create_dir_entry(struct disk* disk, u32 parent_dir_index, char* dir_name, u32 dir_index) {
@@ -789,7 +755,7 @@ int create_dir(struct disk* disk, char* path) {
 	char path_list[MAX_DIR_DEPTH][DIR_NAME_SIZE] = {};
 	i64 path_list_size = 0;
 	char new_dir_name[DIR_NAME_SIZE] = {};
-	u32 dir_block, dir_block_index, parent_dir_entry_block;
+	u32 dir_block, dir_block_index, parent_dir_index;
 
 	ret = bitmap_get_free_block(disk, &dir_block);
 	if(ret) {
@@ -804,14 +770,14 @@ int create_dir(struct disk* disk, char* path) {
 	/* find the index of the parent dir of the dir to be created.
 	 * path_list[path_list_size - 1] is the name of the parent dir, so it
 	 * will search until it finds the parent dir */
-	ret = search_dir_index(disk, path_list, path_list_size - 1, &parent_dir_entry_block);
+	ret = search_dir_index(disk, path_list, path_list_size - 1, &parent_dir_index);
 	if(ret) {
 		print_error("Could not find the parent directory");
 		return ret;
 	}
 
 	/* create the new dir entry */
-	ret = create_dir_entry(disk, parent_dir_entry_block, path_list[path_list_size - 1], dir_block_index);
+	ret = create_dir_entry(disk, parent_dir_index, path_list[path_list_size - 1], dir_block_index);
 	if(ret) {
 		print_error("Could not create the directory entry");
 		return ret;
